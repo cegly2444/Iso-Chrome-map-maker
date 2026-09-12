@@ -15,107 +15,47 @@ import requests
 from shapely.geometry import Point, shape, Polygon, MultiPolygon
 from shapely.prepared import prep
 import folium
-from folium import Element
 from folium.plugins import MarkerCluster
 
 # ---------------------------------------------------------------------------
-# Smooth Continuous Wheel Zoom Plugin (Inertial, Non-Stepped)
+# Google Maps Direct URL Generator
 # ---------------------------------------------------------------------------
 
-SMOOTH_WHEEL_ZOOM_JS = """
-L.Map.mergeOptions({
-    smoothWheelZoom: true,
-    smoothSensitivity: 1.2
-});
+def create_google_maps_url(
+    name: str, lat: float, lon: float, tags: Optional[Dict[str, Any]] = None
+) -> str:
+    """
+    Constructs an accurate Google Maps search URL.
+    Avoids passing generic 'Unnamed' placeholders which confuse Google Maps text search
+    into showing irrelevant business matches (e.g. 'The Diplomat Apartments').
+    """
+    tags = tags or {}
+    addr_parts = []
+    if tags.get("addr:housenumber"):
+        addr_parts.append(str(tags["addr:housenumber"]))
+    if tags.get("addr:street"):
+        addr_parts.append(str(tags["addr:street"]))
+    if tags.get("addr:city"):
+        addr_parts.append(str(tags["addr:city"]))
+    addr_str = " ".join(addr_parts) if addr_parts else None
 
-L.Map.SmoothWheelZoom = L.Handler.extend({
-    addHooks: function () {
-        L.DomEvent.on(this._map._container, 'wheel', this._onWheelScroll, this);
-    },
-    removeHooks: function () {
-        L.DomEvent.off(this._map._container, 'wheel', this._onWheelScroll, this);
-    },
-    _onWheelScroll: function (e) {
-        if (!this._isWheeling) {
-            this._onWheelStart(e);
-        }
-        this._onWheeling(e);
-    },
-    _onWheelStart: function (e) {
-        var map = this._map;
-        this._isWheeling = true;
-        this._wheelMousePosition = map.mouseEventToContainerPoint(e);
-        this._centerPoint = map.getSize()._divideBy(2);
-        this._startLatLng = map.containerPointToLatLng(this._centerPoint);
-        this._wheelMouseLatLng = map.containerPointToLatLng(this._wheelMousePosition);
-        this._startZoom = map.getZoom();
-        this._moved = false;
-        this._zooming = true;
+    clean_name = (name or "").replace('"', "").replace("'", "").strip()
+    is_real_name = (
+        clean_name
+        and not clean_name.lower().startswith("unnamed")
+        and clean_name.lower() != "other"
+    )
 
-        map._stop();
-        if (map._panAnim) map._panAnim.stop();
+    if is_real_name:
+        query = f"{clean_name}, {lat:.6f},{lon:.6f}"
+    elif addr_str:
+        query = f"{addr_str}, {lat:.6f},{lon:.6f}"
+    else:
+        # Exact GPS pin prevents Google Maps from doing an ambiguous keyword search
+        query = f"{lat:.6f},{lon:.6f}"
 
-        this._goalZoom = map.getZoom();
-        this._prevCenter = map.getCenter();
-        this._prevZoom = map.getZoom();
+    return f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(query)}"
 
-        this._zoomAnimationId = requestAnimationFrame(this._updateWheelZoom.bind(this));
-    },
-    _onWheeling: function (e) {
-        var map = this._map;
-        var sensitivity = map.options.smoothSensitivity || 1.2;
-        this._goalZoom = this._goalZoom + L.DomEvent.getWheelDelta(e) * 0.003 * sensitivity;
-        if (this._goalZoom < map.getMinZoom() || this._goalZoom > map.getMaxZoom()) {
-            this._goalZoom = map._limitZoom(this._goalZoom);
-        }
-        this._wheelMousePosition = this._map.mouseEventToContainerPoint(e);
-        this._wheelMouseLatLng = map.containerPointToLatLng(this._wheelMousePosition);
-
-        clearTimeout(this._timeoutId);
-        this._timeoutId = setTimeout(this._onWheelEnd.bind(this), 200);
-
-        L.DomEvent.preventDefault(e);
-        L.DomEvent.stopPropagation(e);
-    },
-    _onWheelEnd: function (e) {
-        this._isWheeling = false;
-        cancelAnimationFrame(this._zoomAnimationId);
-        this._map._moveEnd(true);
-    },
-    _updateWheelZoom: function () {
-        var map = this._map;
-
-        if ((!map.getCenter().equals(this._prevCenter)) || map.getZoom() != this._prevZoom)
-            return;
-
-        this._zoom = map.getZoom() + (this._goalZoom - map.getZoom()) * 0.3;
-        this._zoom = Math.floor(this._zoom * 100) / 100;
-
-        var delta = this._wheelMousePosition.subtract(this._centerPoint);
-        if (delta.x === 0 && delta.y === 0)
-            return;
-
-        if (map.options.smoothWheelZoom === 'center') {
-            this._center = this._startLatLng;
-        } else {
-            this._center = map.unproject(map.project(this._wheelMouseLatLng, this._zoom).subtract(delta), this._zoom);
-        }
-
-        if (!this._moved) {
-            map._moveStart(true, false);
-            this._moved = true;
-        }
-
-        map._move(this._center, this._zoom);
-        this._prevCenter = map.getCenter();
-        this._prevZoom = map.getZoom();
-
-        this._zoomAnimationId = requestAnimationFrame(this._updateWheelZoom.bind(this));
-    }
-});
-
-L.Map.addInitHook('addHandler', 'smoothWheelZoom', L.Map.SmoothWheelZoom);
-"""
 
 # ---------------------------------------------------------------------------
 # Constants & Configuration
@@ -717,21 +657,20 @@ def build_folium_map(
       - Categorized POI markers with custom icons & popups
       - LayerControl for toggling modes and POI categories
     """
-    # Initialize Folium Map with hardware-accelerated canvas rendering and continuous kinetic smooth zooming
+    # Initialize Folium Map with hardware-accelerated canvas rendering and native continuous zooming
     m = folium.Map(
         location=[center_lat, center_lon],
         zoom_start=14,
         tiles=None,  # Custom tiles added below
         prefer_canvas=True,
-        scroll_wheel_zoom=False,  # Disable stepped jump zooming
-        smooth_wheel_zoom=True,   # Enable smooth kinetic wheel zooming
-        smooth_sensitivity=1.2,
-        zoom_snap=0,              # 0 allows continuous fractional zoom without snapping or level jumps!
+        scroll_wheel_zoom=True,       # Native smooth wheel zooming
+        touch_zoom=True,              # Native pinch-to-zoom for trackpads & touchscreens
+        zoom_snap=0,                  # 0 completely disables discrete level snapping!
+        zoom_delta=0.25,              # Fine-grained smooth zoom step
+        wheel_debounce_time=40,       # Fast responsive debounce for wheels & trackpads
+        wheel_px_per_zoom_level=120,  # Natural zoom speed scaling
         control_scale=True,
     )
-
-    # Inject SmoothWheelZoom handler into the map HTML header
-    m.get_root().header.add_child(Element(f"<script>{SMOOTH_WHEEL_ZOOM_JS}</script>"))
 
     # Base Layers: Fast, crisp CartoDB Voyager as default, plus standard OpenStreetMap
     folium.TileLayer(
@@ -859,10 +798,8 @@ def build_folium_map(
             modes_str = ", ".join(item.get("reaching_modes", []))
             osm_link = f"https://www.openstreetmap.org/{item['osm_id']}"
 
-            # Google Maps Direct Search Query URL
-            clean_name = item["name"].replace('"', "").replace("'", "")
-            gmaps_query = urllib.parse.quote(f"{clean_name} {item['lat']:.5f},{item['lon']:.5f}")
-            gmaps_url = f"https://www.google.com/maps/search/?api=1&query={gmaps_query}"
+            # Accurate Google Maps URL (using coordinates to avoid keyword text-search mixups)
+            gmaps_url = create_google_maps_url(item["name"], item["lat"], item["lon"], item.get("tags"))
 
             # Format optional street address from OSM tags
             tags = item.get("tags", {})
@@ -967,9 +904,7 @@ class ApartmentAnalyzer:
         for poi in pois:
             if poi.get("category") == "Apartment Buildings":
                 tags = poi.get("tags", {})
-                clean_name = poi["name"].replace('"', "").replace("'", "")
-                gmaps_query = urllib.parse.quote(f"{clean_name} {poi['lat']:.5f},{poi['lon']:.5f}")
-                gmaps_url = f"https://www.google.com/maps/search/?api=1&query={gmaps_query}"
+                gmaps_url = create_google_maps_url(poi["name"], poi["lat"], poi["lon"], tags)
                 apartments.append({
                     "name": poi["name"],
                     "lat": poi["lat"],

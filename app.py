@@ -24,6 +24,7 @@ from isochrone_analyzer import (
     filter_pois_in_polygons,
     build_folium_map,
     ApartmentAnalyzer,
+    create_google_maps_url,
 )
 
 # ---------------------------------------------------------------------------
@@ -338,9 +339,7 @@ if run_search or "analysis_data" in st.session_state:
         if filtered_pois:
             table_records = []
             for p in filtered_pois:
-                clean_name = p["name"].replace('"', "").replace("'", "")
-                gmaps_query = urllib.parse.quote(f"{clean_name} {p['lat']:.5f},{p['lon']:.5f}")
-                gmaps_url = f"https://www.google.com/maps/search/?api=1&query={gmaps_query}"
+                gmaps_url = create_google_maps_url(p["name"], p["lat"], p["lon"], p.get("tags"))
                 table_records.append({
                     "Name": p["name"],
                     "Category": p["category"],
