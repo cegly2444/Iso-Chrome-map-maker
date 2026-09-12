@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import random
+import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 import requests
 from shapely.geometry import Point, shape, Polygon, MultiPolygon
@@ -65,16 +66,24 @@ DEFAULT_CATEGORIES: Dict[str, Dict[str, Any]] = {
         "tags": [("amenity", "cafe")],
         "icon": "coffee",
         "color": "darkred",
+        "cluster_color": "#8B0000",
         "prefix": "fa",
     },
     "Apartment Buildings": {
         "tags": [
             ("building", "apartments"),
-            ("residential", "apartments"),
             ("building", "residential"),
+            ("building", "flats"),
+            ("building", "dormitory"),
+            ("building", "condominium"),
+            ("residential", "apartments"),
+            ("residential", "flats"),
+            ("residential", "condominium"),
+            ("amenity", "student_accommodation"),
         ],
         "icon": "building",
         "color": "purple",
+        "cluster_color": "#8e44ad",
         "prefix": "fa",
     },
     "Gyms & Fitness": {
@@ -84,6 +93,7 @@ DEFAULT_CATEGORIES: Dict[str, Dict[str, Any]] = {
         ],
         "icon": "heartbeat",
         "color": "green",
+        "cluster_color": "#27ae60",
         "prefix": "fa",
     },
     "Supermarkets & Groceries": {
@@ -94,6 +104,7 @@ DEFAULT_CATEGORIES: Dict[str, Dict[str, Any]] = {
         ],
         "icon": "shopping-cart",
         "color": "orange",
+        "cluster_color": "#d35400",
         "prefix": "fa",
     },
     "Restaurants & Dining": {
@@ -103,6 +114,7 @@ DEFAULT_CATEGORIES: Dict[str, Dict[str, Any]] = {
         ],
         "icon": "cutlery",
         "color": "red",
+        "cluster_color": "#c0392b",
         "prefix": "fa",
     },
     "Bars & Pubs": {
@@ -112,6 +124,7 @@ DEFAULT_CATEGORIES: Dict[str, Dict[str, Any]] = {
         ],
         "icon": "glass",
         "color": "darkpurple",
+        "cluster_color": "#5c2d91",
         "prefix": "fa",
     },
     "Parks & Green Space": {
@@ -121,6 +134,7 @@ DEFAULT_CATEGORIES: Dict[str, Dict[str, Any]] = {
         ],
         "icon": "tree",
         "color": "darkgreen",
+        "cluster_color": "#1e7e34",
         "prefix": "fa",
     },
     "Transit Stops & Stations": {
@@ -131,6 +145,7 @@ DEFAULT_CATEGORIES: Dict[str, Dict[str, Any]] = {
         ],
         "icon": "bus",
         "color": "cadetblue",
+        "cluster_color": "#2980b9",
         "prefix": "fa",
     },
     "Schools & Education": {
@@ -141,6 +156,7 @@ DEFAULT_CATEGORIES: Dict[str, Dict[str, Any]] = {
         ],
         "icon": "graduation-cap",
         "color": "blue",
+        "cluster_color": "#1a5276",
         "prefix": "fa",
     },
 }
@@ -380,9 +396,18 @@ def build_overpass_query(
     for k, v, _ in tag_filters:
         statements.append(f'  node["{k}"="{v}"]({bbox_str});')
         statements.append(f'  way["{k}"="{v}"]({bbox_str});')
+        statements.append(f'  relation["{k}"="{v}"]({bbox_str});')
+
+    # If Apartment Buildings are selected, also query multi-family residential tags and named buildings
+    if "Apartment Buildings" in categories:
+        statements.append(f'  way["building"]["building:flats"]({bbox_str});')
+        statements.append(f'  relation["building"]["building:flats"]({bbox_str});')
+        statements.append(f'  node["building"]["name"~"Apartment|Apartments|Loft|Lofts|Flats|Residences|Condo|Condos|Suites",i]({bbox_str});')
+        statements.append(f'  way["building"]["name"~"Apartment|Apartments|Loft|Lofts|Flats|Residences|Condo|Condos|Suites",i]({bbox_str});')
+        statements.append(f'  relation["building"]["name"~"Apartment|Apartments|Loft|Lofts|Flats|Residences|Condo|Condos|Suites",i]({bbox_str});')
 
     combined_statements = "\n".join(statements)
-    query = f"""[out:json][timeout:30];
+    query = f"""[out:json][timeout:35];
 (
 {combined_statements}
 );
@@ -446,18 +471,41 @@ def fetch_pois(
         seen_ids.add(osm_id)
 
         tags = elem.get("tags", {})
-        # Extract coordinates (node has lat/lon; way has center.lat/center.lon)
+        # Extract coordinates (node has lat/lon; way/relation has center.lat/center.lon)
         lat = elem.get("lat") or elem.get("center", {}).get("lat")
         lon = elem.get("lon") or elem.get("center", {}).get("lon")
         if lat is None or lon is None:
             continue
 
-        # Match category
+        # Match category from explicit tags
         matched_category = "Other"
         for (k, v), cat_name in tag_to_category.items():
             if tags.get(k) == v:
                 matched_category = cat_name
                 break
+
+        # Secondary matching for apartments that might be tagged building=yes with apartment name
+        if matched_category == "Other" and "Apartment Buildings" in categories and tags:
+            bld = str(tags.get("building", "")).lower()
+            res = str(tags.get("residential", "")).lower()
+            amenity = str(tags.get("amenity", "")).lower()
+            name_str = str(tags.get("name", "")).lower()
+
+            apt_keywords = ("apartment", "apartments", "loft", "lofts", "flats", "residence", "residences", "condo", "condos", "suites")
+            is_apt_name = any(kw in name_str for kw in apt_keywords)
+
+            if (
+                bld in ("apartments", "residential", "flats", "dormitory", "condominium", "yes") and (is_apt_name or "building:flats" in tags)
+            ) or (
+                res in ("apartments", "flats", "condominium")
+            ) or (
+                amenity == "student_accommodation"
+            ):
+                matched_category = "Apartment Buildings"
+
+        # Discard untagged or non-matching features
+        if matched_category == "Other":
+            continue
 
         name = tags.get("name") or tags.get("brand") or f"Unnamed {matched_category}"
 
@@ -569,15 +617,38 @@ def build_folium_map(
       - Categorized POI markers with custom icons & popups
       - LayerControl for toggling modes and POI categories
     """
+    # Initialize Folium Map with hardware-accelerated canvas rendering and smooth zooming
     m = folium.Map(
         location=[center_lat, center_lon],
         zoom_start=14,
-        tiles="OpenStreetMap",
+        tiles=None,  # Custom tiles added below
+        prefer_canvas=True,
+        zoom_snap=0.5,
+        zoom_delta=0.5,
+        wheel_debounce_time=40,
+        wheel_px_per_zoom_level=120,
+        control_scale=True,
     )
+
+    # Base Layers: Fast, crisp CartoDB Voyager as default, plus standard OpenStreetMap
+    folium.TileLayer(
+        tiles="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+        name="Voyager (Smooth & Fast)",
+        subdomains="abcd",
+        max_zoom=20,
+        control=True,
+    ).add_to(m)
+
+    folium.TileLayer(
+        tiles="OpenStreetMap",
+        name="OpenStreetMap Standard",
+        control=True,
+    ).add_to(m)
 
     # 1. Add Center Pin
     center_html = f"""
-    <div style="font-family:sans-serif; min-width:200px;">
+    <div style="font-family:-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; min-width:200px;">
         <h4 style="margin:0 0 5px 0; color:#c0392b;">📍 Starting Location</h4>
         <p style="margin:0; font-size:13px;"><b>{center_name}</b></p>
         <p style="margin:4px 0 0 0; color:#7f8c8d; font-size:11px;">
@@ -634,8 +705,7 @@ def build_folium_map(
 
             fg_isochrone.add_to(m)
 
-    # 3. Add POI Markers grouped by Category
-    # Group POIs by category
+    # 3. Add POI Markers grouped by Category with Color-Coded Building Clusters
     pois_by_cat: Dict[str, List[Dict[str, Any]]] = {}
     for poi in filtered_pois:
         pois_by_cat.setdefault(poi["category"], []).append(poi)
@@ -643,39 +713,111 @@ def build_folium_map(
     for cat_name, cat_items in pois_by_cat.items():
         cat_meta = DEFAULT_CATEGORIES.get(
             cat_name,
-            {"icon": "map-marker", "color": "blue", "prefix": "fa"},
+            {"icon": "map-marker", "color": "blue", "cluster_color": "#2980b9", "prefix": "fa"},
         )
+        cluster_color = cat_meta.get("cluster_color", "#2980b9")
         layer_display_name = f"📌 {cat_name} ({len(cat_items)})"
         cat_group = folium.FeatureGroup(name=layer_display_name, show=True)
 
-        marker_container = MarkerCluster().add_to(cat_group) if cluster_markers else cat_group
+        if cluster_markers:
+            # Custom cluster icon that color-codes by building type instead of count
+            icon_create_func = f"""
+            function(cluster) {{
+                var count = cluster.getChildCount();
+                var size = count < 10 ? 36 : (count < 100 ? 42 : 48);
+                var fontSize = count < 100 ? '13px' : '11px';
+                return new L.DivIcon({{
+                    html: '<div style="' +
+                          'background-color: {cluster_color}; ' +
+                          'color: #ffffff; ' +
+                          'width: ' + size + 'px; ' +
+                          'height: ' + size + 'px; ' +
+                          'line-height: ' + size + 'px; ' +
+                          'border-radius: 50%; ' +
+                          'text-align: center; ' +
+                          'font-weight: 700; ' +
+                          'font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; ' +
+                          'font-size: ' + fontSize + '; ' +
+                          'border: 3px solid rgba(255, 255, 255, 0.92); ' +
+                          'box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35); ' +
+                          'display: flex; align-items: center; justify-content: center;' +
+                          '">' + count + '</div>',
+                    className: 'custom-building-cluster',
+                    iconSize: new L.Point(size, size),
+                    iconAnchor: new L.Point(size / 2, size / 2)
+                }});
+            }}
+            """
+            marker_container = MarkerCluster(icon_create_function=icon_create_func).add_to(cat_group)
+        else:
+            marker_container = cat_group
 
         for item in cat_items:
             modes_str = ", ".join(item.get("reaching_modes", []))
             osm_link = f"https://www.openstreetmap.org/{item['osm_id']}"
-            
-            # Rich popup card
+
+            # Google Maps Direct Search Query URL
+            clean_name = item["name"].replace('"', "").replace("'", "")
+            gmaps_query = urllib.parse.quote(f"{clean_name} {item['lat']:.5f},{item['lon']:.5f}")
+            gmaps_url = f"https://www.google.com/maps/search/?api=1&query={gmaps_query}"
+
+            # Format optional street address from OSM tags
+            tags = item.get("tags", {})
+            addr_parts = []
+            if tags.get("addr:housenumber"):
+                addr_parts.append(str(tags["addr:housenumber"]))
+            if tags.get("addr:street"):
+                addr_parts.append(str(tags["addr:street"]))
+            if tags.get("addr:city"):
+                addr_parts.append(str(tags["addr:city"]))
+            addr_html = ""
+            if addr_parts:
+                addr_html = f"""
+                <tr>
+                    <td style="color:#7f8c8d; padding:2px 0;">Address:</td>
+                    <td style="text-align:right;">{' '.join(addr_parts)}</td>
+                </tr>
+                """
+
+            # Rich popup card with Google Maps button
             popup_html = f"""
-            <div style="font-family:sans-serif; min-width:210px; font-size:12px;">
-                <h4 style="margin:0 0 4px 0; color:#2c3e50;">{item['name']}</h4>
-                <div style="margin-bottom:6px;">
-                    <span style="background:#ecf0f1; padding:2px 6px; border-radius:4px; font-weight:600;">
+            <div style="font-family:-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; min-width:230px; font-size:12px;">
+                <h4 style="margin:0 0 5px 0; color:#1a252f; font-size:14px; line-height:1.3;">{item['name']}</h4>
+                <div style="margin-bottom:8px;">
+                    <span style="background:{cluster_color}22; color:{cluster_color}; border:1px solid {cluster_color}55; padding:2px 8px; border-radius:4px; font-weight:700; font-size:11px;">
                         {item['category']}
                     </span>
                 </div>
-                <table style="width:100%; border-collapse:collapse; margin-bottom:6px;">
+                <table style="width:100%; border-collapse:collapse; margin-bottom:8px; font-size:12px;">
                     <tr>
-                        <td style="color:#7f8c8d;">Distance:</td>
-                        <td><b>{item.get('distance_mi', 'N/A')} mi</b> ({item.get('distance_km', 'N/A')} km)</td>
+                        <td style="color:#7f8c8d; padding:2px 0;">Distance:</td>
+                        <td style="text-align:right;"><b>{item.get('distance_mi', 'N/A')} mi</b> ({item.get('distance_km', 'N/A')} km)</td>
                     </tr>
                     <tr>
-                        <td style="color:#7f8c8d;">Reachable by:</td>
-                        <td><b>{modes_str}</b></td>
+                        <td style="color:#7f8c8d; padding:2px 0;">Reachable by:</td>
+                        <td style="text-align:right;"><b>{modes_str}</b></td>
                     </tr>
+                    {addr_html}
                 </table>
-                <div style="font-size:11px;">
-                    <a href="{osm_link}" target="_blank" style="color:#2980b9; text-decoration:none;">
-                        View on OpenStreetMap ↗
+                <a href="{gmaps_url}" target="_blank" rel="noopener noreferrer" style="
+                    display: block;
+                    box-sizing: border-box;
+                    text-align: center;
+                    background-color: #1a73e8;
+                    color: #ffffff !important;
+                    padding: 8px 12px;
+                    border-radius: 6px;
+                    text-decoration: none;
+                    font-weight: 600;
+                    font-size: 12px;
+                    margin-bottom: 6px;
+                    box-shadow: 0 2px 4px rgba(26,115,232,0.3);
+                ">
+                    📍 Open in Google Maps ↗
+                </a>
+                <div style="text-align:center; font-size:11px;">
+                    <a href="{osm_link}" target="_blank" rel="noopener noreferrer" style="color:#7f8c8d; text-decoration:underline;">
+                        View on OpenStreetMap
                     </a>
                 </div>
             </div>
@@ -684,7 +826,7 @@ def build_folium_map(
             folium.Marker(
                 [item["lat"], item["lon"]],
                 tooltip=f"{item['name']} ({item['category']})",
-                popup=folium.Popup(popup_html, max_width=280),
+                popup=folium.Popup(popup_html, max_width=300),
                 icon=folium.Icon(
                     color=cat_meta["color"],
                     icon=cat_meta["icon"],
@@ -722,19 +864,23 @@ class ApartmentAnalyzer:
         for poi in pois:
             if poi.get("category") == "Apartment Buildings":
                 tags = poi.get("tags", {})
+                clean_name = poi["name"].replace('"', "").replace("'", "")
+                gmaps_query = urllib.parse.quote(f"{clean_name} {poi['lat']:.5f},{poi['lon']:.5f}")
+                gmaps_url = f"https://www.google.com/maps/search/?api=1&query={gmaps_query}"
                 apartments.append({
                     "name": poi["name"],
                     "lat": poi["lat"],
                     "lon": poi["lon"],
                     "distance_mi": poi.get("distance_mi"),
                     "levels": tags.get("building:levels", "Unknown"),
-                    "flats": tags.get("flats", tags.get("building:flats", "Unknown")),
+                    "flats": tags.get("flats") or tags.get("building:flats") or "Unknown",
                     "operator": tags.get("operator", "Unknown"),
                     "street": tags.get("addr:street"),
                     "housenumber": tags.get("addr:housenumber"),
                     "postcode": tags.get("addr:postcode"),
                     "wheelchair": tags.get("wheelchair", "Unknown"),
                     "website": tags.get("website") or tags.get("contact:website"),
+                    "google_maps": gmaps_url,
                 })
         return apartments
 

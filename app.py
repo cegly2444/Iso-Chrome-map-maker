@@ -8,6 +8,7 @@ transit boundaries, query OpenStreetMap POIs, and analyze reachable amenities.
 from __future__ import annotations
 
 import os
+import urllib.parse
 from typing import List, Tuple
 import streamlit as st
 import streamlit.components.v1 as components
@@ -337,12 +338,16 @@ if run_search or "analysis_data" in st.session_state:
         if filtered_pois:
             table_records = []
             for p in filtered_pois:
+                clean_name = p["name"].replace('"', "").replace("'", "")
+                gmaps_query = urllib.parse.quote(f"{clean_name} {p['lat']:.5f},{p['lon']:.5f}")
+                gmaps_url = f"https://www.google.com/maps/search/?api=1&query={gmaps_query}"
                 table_records.append({
                     "Name": p["name"],
                     "Category": p["category"],
                     "Distance (mi)": p.get("distance_mi"),
                     "Distance (km)": p.get("distance_km"),
                     "Reachable By": ", ".join(p.get("reaching_modes", [])),
+                    "Google Maps": gmaps_url,
                     "Latitude": round(p["lat"], 5),
                     "Longitude": round(p["lon"], 5),
                 })
@@ -352,7 +357,14 @@ if run_search or "analysis_data" in st.session_state:
             if search_filter:
                 df = df[df["Name"].str.contains(search_filter, case=False, na=False)]
 
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(
+                df,
+                column_config={
+                    "Google Maps": st.column_config.LinkColumn("Google Maps", display_text="Open in Maps ↗"),
+                },
+                use_container_width=True,
+                hide_index=True,
+            )
 
             csv = df.to_csv(index=False).encode("utf-8")
             st.download_button(
@@ -387,7 +399,7 @@ if run_search or "analysis_data" in st.session_state:
         if apts:
             st.markdown("#### Reachable Apartment Buildings")
             apt_df = pd.DataFrame(apts)
-            display_cols = ["name", "distance_mi", "levels", "flats", "street", "housenumber", "operator", "website"]
+            display_cols = ["name", "distance_mi", "levels", "flats", "street", "housenumber", "operator", "google_maps", "website"]
             available_cols = [c for c in display_cols if c in apt_df.columns]
             st.dataframe(
                 apt_df[available_cols].rename(columns={
@@ -398,8 +410,13 @@ if run_search or "analysis_data" in st.session_state:
                     "street": "Street",
                     "housenumber": "No.",
                     "operator": "Management",
+                    "google_maps": "Google Maps",
                     "website": "Website",
                 }),
+                column_config={
+                    "Google Maps": st.column_config.LinkColumn("Google Maps", display_text="Open in Maps ↗"),
+                    "Website": st.column_config.LinkColumn("Website", display_text="Visit Site ↗"),
+                },
                 use_container_width=True,
                 hide_index=True,
             )
