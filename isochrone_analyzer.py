@@ -16,6 +16,7 @@ from shapely.geometry import Point, shape, Polygon, MultiPolygon
 from shapely.prepared import prep
 import folium
 from folium.plugins import MarkerCluster
+from branca.element import Element
 
 # ---------------------------------------------------------------------------
 # Google Maps Direct URL Generator
@@ -657,18 +658,16 @@ def build_folium_map(
       - Categorized POI markers with custom icons & popups
       - LayerControl for toggling modes and POI categories
     """
-    # Initialize Folium Map with hardware-accelerated canvas rendering and native continuous zooming
+    # Initialize Folium Map with hardware-accelerated canvas rendering
     m = folium.Map(
         location=[center_lat, center_lon],
         zoom_start=14,
         tiles=None,  # Custom tiles added below
         prefer_canvas=True,
-        scroll_wheel_zoom=True,       # Native smooth wheel zooming
-        touch_zoom=True,              # Native pinch-to-zoom for trackpads & touchscreens
+        scroll_wheel_zoom=False,      # Disabled native debounced handler in favor of direct 1:1 linear zoom
+        touch_zoom=True,              # Native pinch-to-zoom for touchscreens
         zoom_snap=0,                  # 0 completely disables discrete level snapping!
-        zoom_delta=0.25,              # Fine-grained smooth zoom step
-        wheel_debounce_time=40,       # Fast responsive debounce for wheels & trackpads
-        wheel_px_per_zoom_level=120,  # Natural zoom speed scaling
+        zoom_delta=1.0,               # Clean 1-step zooming for + / - buttons
         control_scale=True,
     )
 
@@ -883,6 +882,88 @@ def build_folium_map(
     bbox = compute_combined_bounding_box(isochrone_results)
     if bbox != (0.0, 0.0, 0.0, 0.0):
         m.fit_bounds([[bbox[0], bbox[1]], [bbox[2], bbox[3]]])
+
+    # 6. Inject direct 1:1 linear wheel zoom handler
+    # Eliminates Leaflet's built-in debounced sigmoid acceleration which caused
+    # zooming to feel super slow at first then jump erratically ("bam it moves a lot").
+    map_var = m.get_name()
+    linear_zoom_script = f"""
+    <script>
+    (function() {{
+        function initLinearWheelZoom() {{
+            var map = (typeof {map_var} !== 'undefined') ? {map_var} : (window['{map_var}'] || null);
+            if (!map || !map.getContainer) {{
+                setTimeout(initLinearWheelZoom, 40);
+                return;
+            }}
+            try {{
+                if (map.scrollWheelZoom && map.scrollWheelZoom.enabled()) {{
+                    map.scrollWheelZoom.disable();
+                }}
+            }} catch(err) {{}}
+
+            var container = map.getContainer();
+            if (!container || container._hasLinearZoom) return;
+            container._hasLinearZoom = true;
+
+            var pendingDelta = 0;
+            var lastMousePoint = null;
+            var ticking = false;
+
+            function applyZoom() {{
+                ticking = false;
+                if (pendingDelta === 0) return;
+
+                var currentZoom = map.getZoom();
+                // 1:1 linear zoom scaling: immediate response, zero deadzone, zero sudden jump
+                var zoomChange = -pendingDelta * 0.002;
+                pendingDelta = 0;
+
+                var minZ = map.getMinZoom();
+                var maxZ = map.getMaxZoom();
+                var newZoom = Math.max(minZ, Math.min(maxZ, currentZoom + zoomChange));
+
+                if (Math.abs(newZoom - currentZoom) > 0.0001) {{
+                    var anchor = lastMousePoint || map.getSize().divideBy(2);
+                    map.setZoomAround(anchor, newZoom, {{ animate: false }});
+                }}
+            }}
+
+            container.addEventListener('wheel', function(e) {{
+                e.preventDefault();
+                e.stopPropagation();
+
+                var delta = e.deltaY;
+                if (e.deltaMode === 1) {{
+                    delta *= 33; // DOM_DELTA_LINE to pixels
+                }} else if (e.deltaMode === 2) {{
+                    delta *= 400; // DOM_DELTA_PAGE to pixels
+                }}
+
+                pendingDelta += delta;
+                try {{
+                    lastMousePoint = map.mouseEventToContainerPoint(e);
+                }} catch(err) {{
+                    lastMousePoint = null;
+                }}
+
+                if (!ticking) {{
+                    ticking = true;
+                    requestAnimationFrame(applyZoom);
+                }}
+            }}, {{ passive: false, capture: true }});
+        }}
+
+        if (document.readyState === 'complete') {{
+            initLinearWheelZoom();
+        }} else {{
+            window.addEventListener('load', initLinearWheelZoom);
+            setTimeout(initLinearWheelZoom, 80);
+        }}
+    }})();
+    </script>
+    """
+    m.get_root().html.add_child(Element(linear_zoom_script))
 
     return m
 
