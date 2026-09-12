@@ -697,6 +697,11 @@ def build_folium_map(
     # 4. Add Folium Layer Control (allows toggling isochrones and POI categories)
     folium.LayerControl(collapsed=False, position="topright").add_to(m)
 
+    # 5. Automatically fit map bounds to the isochrone polygons
+    bbox = compute_combined_bounding_box(isochrone_results)
+    if bbox != (0.0, 0.0, 0.0, 0.0):
+        m.fit_bounds([[bbox[0], bbox[1]], [bbox[2], bbox[3]]])
+
     return m
 
 

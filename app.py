@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from typing import List, Tuple
 import streamlit as st
-from streamlit_folium import st_folium
+import streamlit.components.v1 as components
 import pandas as pd
 
 from isochrone_analyzer import (
@@ -287,7 +287,18 @@ if run_search or "analysis_data" in st.session_state:
             filtered_pois=filtered_pois,
             cluster_markers=cluster_markers,
         )
-        st_folium(folium_map, width="100%", height=620, returned_objects=[])
+        map_html = folium_map.get_root().render()
+        components.html(map_html, height=640, scrolling=False)
+
+        col_dl, _ = st.columns([2, 5])
+        with col_dl:
+            st.download_button(
+                label="📥 Download Map as Standalone HTML",
+                data=map_html,
+                file_name=f"isochrone_map_{travel_minutes}min.html",
+                mime="text/html",
+                help="Save this interactive map to open in any web browser or share.",
+            )
 
     with tab_stats:
         st.subheader("Amenity Counts Inside Isochrone Boundary")
