@@ -170,6 +170,10 @@ st.markdown(
     "and services within your specified travel time."
 )
 
+# Auto-populate initial map so the map is always visible on first load
+if "analysis_data" not in st.session_state and not run_search:
+    run_search = True
+
 if run_search or "analysis_data" in st.session_state:
     if run_search:
         if not selected_mode_keys:
@@ -215,8 +219,8 @@ if run_search or "analysis_data" in st.session_state:
             try:
                 raw_pois = fetch_pois(bbox, selected_categories, custom_tags)
             except Exception as e:
-                st.error(f"Overpass API error: {e}. Please try again in a few moments.")
-                st.stop()
+                st.warning(f"Overpass API mirror notice: {e}. Rendering map with travel isochrone boundaries.")
+                raw_pois = []
 
         with st.spinner("Performing spatial point-in-polygon filtering..."):
             filtered_pois, stats = filter_pois_in_polygons(
